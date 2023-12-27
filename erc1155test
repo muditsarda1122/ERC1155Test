@@ -1,0 +1,344 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "forge-std/Test.sol";
+import "../src/erc1155.sol";
+
+contract TestERC1155 is Test {
+    erc1155 TestToken;
+
+    address public alice = makeAddr("alice");
+    address public bob = makeAddr("bob");
+    address public charlie = makeAddr("charlie");
+    address public delta = makeAddr("delta");
+
+    address public tokenOwner = 0x1234567890123456789012345678901234567890;
+
+    event receivedOnFallback(address sender, uint256 value);
+    event receivedOnReceive(address sender, uint256 value);
+
+    // Mapping from token ID to account balances
+    // token ID --> account --> balance
+    mapping(uint256 => mapping(address => uint256)) private _balances;
+
+    // Mapping from account to operator approvals
+    // approving account --> operator --> bool
+    mapping(address => mapping(address => bool)) private _operatorApprovals;
+
+    mapping(uint256 => uint256) private _idsToBalances;
+
+    function setUp() public {
+        TestToken = new erc1155();
+
+        vm.startPrank(tokenOwner);
+        TestToken.mint(alice, 5, 10, "");
+        TestToken.mint(alice, 10, 5, "");
+        TestToken.mint(bob, 12, 21, "");
+        TestToken.mint(charlie, 20, 22, "");
+        TestToken.mint(charlie, 22, 20, "");
+        TestToken.mint(delta, 15, 15, "");
+        vm.stopPrank();
+
+        vm.prank(alice);
+        TestToken.setApprovalForAll(delta, true);
+    }
+
+    //Mint the maximum allowed number of tokens and verify the contract behavior
+    function testFail_mintMaxTokens() public {
+        uint256 maxNumberOfTokens = type(uint256).max + 1;
+        vm.prank(tokenOwner);
+        TestToken.mint(alice, 13, maxNumberOfTokens, "");
+    }
+
+    //Mint a token with quantity 0
+    function test_mintQuantityZero() public {
+        vm.startPrank(tokenOwner);
+        vm.expectRevert("zero amount not allowed");
+        TestToken.mint(alice, 13, 0, "");
+    }
+
+    //Mint a token to the zero address
+    function test_mintAddressZero() public {
+        vm.startPrank(tokenOwner);
+        vm.expectRevert("ERC1155: mint to the zero address");
+        TestToken.mint(address(0), 13, 10, "");
+    }
+
+    //mint batch function test
+    function test_mintBatch() public {
+        uint256[] memory ids = new uint256[](3);
+        ids[0] = 1;
+        ids[1] = 2;
+        ids[2] = 3;
+        uint256[] memory amounts = new uint256[](3);
+        amounts[0] = 30;
+        amounts[1] = 31;
+        amounts[2] = 32;
+
+        vm.prank(tokenOwner);
+        TestToken.mintBatch(bob, ids, amounts, "");
+
+        uint256 balance1 = TestToken.balanceOf(bob, 1);
+        uint256 balance2 = TestToken.balanceOf(bob, 2);
+        uint256 balance3 = TestToken.balanceOf(bob, 3);
+
+        assertEq(balance1, 30);
+        assertEq(balance2, 31);
+        assertEq(balance3, 32);
+    }
+
+    // test for zero address, different lengths of ids and amounts and zero amount
+    function test_mintBatchIrregularities() public {
+        uint256[] memory ids = new uint256[](3);
+        ids[0] = 1;
+        ids[1] = 2;
+        ids[2] = 3;
+        uint256[] memory amounts = new uint256[](3);
+        amounts[0] = 30;
+        amounts[1] = 31;
+        amounts[2] = 32;
+
+        vm.startPrank(tokenOwner);
+        vm.expectRevert("ERC1155: mint to the zero address");
+        TestToken.mintBatch(address(0), ids, amounts, "");
+        vm.stopPrank();
+
+        uint256[] memory amounts1 = new uint256[](4);
+        amounts1[0] = 30;
+        amounts1[1] = 31;
+        amounts1[2] = 32;
+        amounts1[3] = 33;
+
+        vm.startPrank(tokenOwner);
+        vm.expectRevert("ERC1155: ids and amounts length mismatch");
+        TestToken.mintBatch(bob, ids, amounts1, "");
+        vm.stopPrank();
+
+        uint256[] memory amounts2 = new uint256[](3);
+        amounts2[0] = 30;
+        amounts2[1] = 0;
+        amounts2[2] = 32;
+
+        vm.startPrank(tokenOwner);
+        vm.expectRevert("zero amount is not allowed");
+        TestToken.mintBatch(bob, ids, amounts2, "");
+        vm.stopPrank();
+    }
+
+    //test balanceOfBatch function
+    function test_balanceOfBatch() public {
+        address[] memory accounts = new address[](2);
+        accounts[0] = alice;
+        accounts[1] = bob;
+        uint256[] memory ids = new uint256[](3);
+        ids[0] = 5;
+        ids[1] = 12;
+        ids[2] = 20;
+        uint256[] memory ids1 = new uint256[](2);
+        ids1[0] = 5;
+        ids1[1] = 12;
+
+        uint256[] memory result = new uint256[](2);
+
+        vm.expectRevert("ERC1155: accounts and ids length mismatch");
+        TestToken.balanceOfBatch(accounts, ids);
+
+        result = TestToken.balanceOfBatch(accounts, ids1);
+    }
+
+    //Transfer a quantity of tokens that exceeds the sender's balance.
+    function test_transferMoreThanBalance() public {
+        vm.startPrank(alice);
+        vm.expectRevert("ERC1155: insufficient balance for transfer");
+        TestToken.safeTransferFrom(alice, bob, 5, 12, "");
+    }
+
+    //Transfer a quantity of tokens to the zero address
+    function test_transferToAddressZero() public {
+        vm.prank(alice);
+        vm.expectRevert("ERC1155: transfer to the zero address");
+        TestToken.safeTransferFrom(alice, address(0), 5, 2, "");
+    }
+
+    //TransferFrom a quantity of tokens that exceeds the spender's allowance(!!! there is nothing like allowance of spender!!!)
+    function test_transfermoreThanAllowance() public {
+        vm.prank(delta);
+        vm.expectRevert("ERC1155: insufficient balance for transfer");
+        TestToken.safeTransferFrom(alice, bob, 5, 12, "");
+    }
+
+    //Attempt to transfer a token from an address that doesn't own it.
+    function test_transferFromNonOwner() public {
+        vm.prank(charlie);
+        vm.expectRevert("ERC1155: caller is not token owner or approved");
+        TestToken.safeTransferFrom(alice, bob, 5, 2, "");
+    }
+
+    //Approve an address to transferFrom with an allowance of 0
+
+    //Increase and decrease allowances for different addresses
+
+    //Attempt to transferFrom without an allowance
+
+    //Batch transfer tokens to multiple addresses with varying quantities(made 'safeBatchTransferFromMultipleReceivers' for this)
+    //       --> id:5 & amt:2 , id:10 & amt:2 --> bob
+    //      |
+    // alice --> id:5 & amt:3 ------------------> charlie
+    //      |
+    //       --> id:10 & amt:1 -----------------> delta
+    function test_transferToMuktipleAddressesWithVaryingQuantities() public {
+        address[] memory tos = new address[](4);
+        tos[0] = bob;
+        tos[1] = bob;
+        tos[2] = charlie;
+        tos[3] = delta;
+        uint256[] memory ids = new uint256[](4);
+        ids[0] = 5;
+        ids[1] = 10;
+        ids[2] = 5;
+        ids[3] = 10;
+        uint256[] memory amounts = new uint256[](4);
+        amounts[0] = 2;
+        amounts[1] = 2;
+        amounts[2] = 3;
+        amounts[3] = 1;
+
+        vm.prank(alice);
+        TestToken.safeBatchTransferFromMultipleReceivers(
+            alice,
+            tos,
+            ids,
+            amounts,
+            ""
+        );
+
+        uint256 balanceBob1 = TestToken.balanceOf(bob, 5);
+        uint256 balanceBob2 = TestToken.balanceOf(bob, 10);
+        uint256 balancecharlie = TestToken.balanceOf(charlie, 5);
+        uint256 balanceDelta = TestToken.balanceOf(delta, 10);
+
+        assertEq(balanceBob1, 2);
+        assertEq(balanceBob2, 2);
+        assertEq(balancecharlie, 3);
+        assertEq(balanceDelta, 1);
+    }
+
+    //Batch transfer tokens with an empty array of recipients
+    function test_batchTransferWithEmptyRecipients() public {
+        address[] memory tos = new address[](4);
+        uint256[] memory ids = new uint256[](4);
+        ids[0] = 5;
+        ids[1] = 10;
+        ids[2] = 5;
+        ids[3] = 10;
+        uint256[] memory amounts = new uint256[](4);
+        amounts[0] = 2;
+        amounts[1] = 2;
+        amounts[2] = 3;
+        amounts[3] = 1;
+
+        vm.prank(alice);
+        vm.expectRevert("ERC1155: transfer to the zero address");
+        TestToken.safeBatchTransferFromMultipleReceivers(
+            alice,
+            tos,
+            ids,
+            amounts,
+            ""
+        );
+    }
+
+    //Burn a quantity of tokens that exceeds the owner's balance
+    function test_burnMoreThanOwned() public {
+        vm.prank(alice);
+        vm.expectRevert("ERC1155: burn amount exceeds balance");
+        TestToken.burn(alice, 5, 12);
+    }
+
+    //Burn a quantity of tokens from the zero address
+    function test_burnFromZeroAddress() public {
+        vm.prank(address(0));
+        vm.expectRevert("ERC1155: burn from the zero address");
+        TestToken.burn(address(0), 10, 10);
+    }
+
+    //Burn a token from an address that doesn't own it
+    function test_burnFromNonOwner() public {
+        vm.prank(bob);
+        vm.expectRevert("can only burn owned tokens");
+        TestToken.burn(alice, 5, 5);
+    }
+
+    //Test the contract's fallback and receive functions by sending ether to the contract
+    function test_sendFundsToFallback() public {
+        uint256 initialContractBalance = address(TestToken).balance;
+        address sender = address(123);
+        vm.deal(sender, 5);
+        vm.startPrank(sender);
+        vm.expectEmit();
+        emit receivedOnFallback(sender, 3);
+        (bool success, ) = address(TestToken).call{value: 3}("1234");
+        require(success, "Transaction failed");
+        vm.stopPrank();
+        uint256 finalContractBalance = address(TestToken).balance;
+        assertEq(finalContractBalance - initialContractBalance, 3);
+    }
+
+    function test_sendFundsToReceive() public {
+        uint256 initialContractBalance = address(TestToken).balance;
+        address sender = address(123);
+        vm.deal(sender, 5);
+        vm.startPrank(sender);
+        vm.expectEmit();
+        emit receivedOnReceive(sender, 3);
+        (bool success, ) = address(TestToken).call{value: 3}("");
+        require(success, "Transaction failed");
+        vm.stopPrank();
+        uint256 finalContractBalance = address(TestToken).balance;
+        assertEq(finalContractBalance - initialContractBalance, 3);
+    }
+
+    //Perform operations on non-existent token IDs
+    function testFail_burnTokensNotMinted() public {
+        vm.startPrank(bob);
+        require(TestToken.tokenExists(15));
+        TestToken.burn(bob, 15, 2); //token with id 15 has not been minted yet
+    }
+
+    function test_burnTokenMinted() public {
+        vm.startPrank(bob);
+        require(TestToken.tokenExists(12));
+        TestToken.burn(bob, 12, 12);
+    }
+
+    //Interact with the contract when there are no tokens minted
+    function test_whenNoTokenMinted() public {
+        vm.startPrank(alice);
+        TestToken.burn(alice, 5, 10);
+        TestToken.burn(alice, 10, 5);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        TestToken.burn(bob, 12, 21);
+        vm.stopPrank();
+
+        vm.startPrank(charlie);
+        TestToken.burn(charlie, 20, 22);
+        TestToken.burn(charlie, 22, 20);
+        vm.stopPrank();
+
+        vm.startPrank(delta);
+        TestToken.burn(delta, 15, 15);
+        vm.stopPrank();
+
+        vm.startPrank(alice);
+        vm.expectRevert("ERC1155: burn amount exceeds balance");
+        TestToken.burn(alice, 24, 42);
+        vm.stopPrank();
+
+        vm.startPrank(alice);
+        vm.expectRevert("ERC1155: insufficient balance for transfer");
+        TestToken.safeTransferFrom(alice, bob, 4, 2, "");
+        vm.stopPrank();
+    }
+}
